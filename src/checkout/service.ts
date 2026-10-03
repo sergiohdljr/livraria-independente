@@ -60,17 +60,18 @@ export async function checkout(
     const shippingCents = await shippingForPostalCode(client, postalCode);
     const lines = await quoteLines(remote, input.sessionId);
     if (lines.length === 0) throw new AppError(422, "empty_cart");
-    if (lines.some((line) => line.quantity > line.stock)) throw new AppError(409, "insufficient_stock");
 
     const existing = await findMatchingOrder(client, input.sessionId, lines);
     if (existing) {
-      await clearCart(remote, input.sessionId);
+      const emailConfirmation = await finishCartAndEmail(remote, email, input.sessionId, existing);
       return {
         order: existing,
         payment: { status: "accepted", amountCents: existing.totalCents },
-        emailConfirmation: "sent",
+        emailConfirmation,
       };
     }
+
+    if (lines.some((line) => line.quantity > line.stock)) throw new AppError(409, "insufficient_stock");
 
     const totalCents = lines.reduce((sum, line) => sum + line.quantity * line.unitPriceCents, 0) + shippingCents;
     const charge = await createCharge(remote, totalCents, input.simulate);
@@ -87,15 +88,18 @@ export async function checkout(
     try {
       order = await insertOrder(client, input, postalCode, shippingCents, totalCents, charge.id, lines);
     } catch (error) {
-      const restored = await postStock(remote, "restore", stockLines);
       console.error(`payment accepted without order session=${input.sessionId} amount=${charge.amountCents}`);
+      let restored = false;
+      try {
+        restored = await postStock(remote, "restore", stockLines);
+      } catch (restoreError) {
+        console.error(`stock still debited without order session=${input.sessionId}`, restoreError);
+      }
       if (!restored) throw new AppError(500, "internal_error");
       throw error;
     }
 
-    const cleared = await clearCart(remote, input.sessionId);
-    if (!cleared) console.error(`cart not cleared session=${input.sessionId} order=${order.id}`);
-    const emailConfirmation = await confirmByEmail(email, input.email, order);
+    const emailConfirmation = await finishCartAndEmail(remote, email, input.sessionId, order);
     return {
       order,
       payment: { status: "accepted", amountCents: charge.amountCents },
@@ -173,6 +177,21 @@ async function postStock(remote: Remote, action: "debit" | "restore", lines: Arr
     body: JSON.stringify({ lines }),
   });
   return response.ok;
+}
+
+async function finishCartAndEmail(
+  remote: Remote,
+  email: EmailPort,
+  sessionId: string,
+  order: Order,
+): Promise<"sent" | "failed"> {
+  try {
+    const cleared = await clearCart(remote, sessionId);
+    if (!cleared) console.error(`cart not cleared session=${sessionId} order=${order.id}`);
+  } catch (error) {
+    console.error(`cart not cleared session=${sessionId} order=${order.id}`, error);
+  }
+  return confirmByEmail(email, order.email, order);
 }
 
 async function clearCart(remote: Remote, sessionId: string): Promise<boolean> {
