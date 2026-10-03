@@ -1,106 +1,84 @@
-import { randomUUID } from "node:crypto";
-import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "../db.js";
 import { AppError } from "../shared/errors.js";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-export type SessaoCarrinho = {
-  sessaoId: string;
-  carrinhoId: string;
+export type CartItem = {
+  bookId: string;
+  title: string;
+  quantity: number;
+  currentPriceCents: number;
 };
 
-export type ItemCarrinho = {
-  livroId: string;
-  titulo: string;
-  quantidade: number;
-  precoAtualCentavos: number;
+export type Cart = {
+  items: CartItem[];
 };
 
-export async function resolverSessao(
+export async function addItem(
   pool: Pool,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): Promise<SessaoCarrinho> {
-  const cookie = request.cookies["sessao"];
-  if (cookie && UUID.test(cookie)) {
-    const existing = await pool.query<{ carrinho_id: string }>(
-      `SELECT c.id AS carrinho_id
-       FROM sessoes s
-       JOIN carrinhos c ON c.sessao_id = s.id
-       WHERE s.id = $1`,
-      [cookie],
-    );
-    const row = existing.rows[0];
-    if (row) return { sessaoId: cookie, carrinhoId: row.carrinho_id };
-  }
-
-  const sessaoId = randomUUID();
-  const carrinhoId = randomUUID();
-  await pool.query("INSERT INTO sessoes (id) VALUES ($1)", [sessaoId]);
-  await pool.query("INSERT INTO carrinhos (id, sessao_id) VALUES ($1, $2)", [carrinhoId, sessaoId]);
-  reply.setCookie("sessao", sessaoId, { path: "/", httpOnly: true, sameSite: "lax" });
-  return { sessaoId, carrinhoId };
-}
-
-export async function adicionarItem(
-  pool: Pool,
-  carrinhoId: string,
-  livroId: string,
-  quantidade: number,
-): Promise<void> {
-  const livro = await pool.query("SELECT id FROM livros WHERE id = $1", [livroId]);
-  if (!livro.rows[0]) throw new AppError(404, "livro_nao_encontrado");
+  sessionId: string,
+  bookId: string,
+  quantity: number,
+): Promise<Cart> {
+  const book = await pool.query("SELECT id FROM books WHERE id = $1", [bookId]);
+  if (!book.rows[0]) throw new AppError(404, "book_not_found");
 
   await pool.query(
-    `INSERT INTO itens_carrinho (carrinho_id, livro_id, quantidade)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (carrinho_id, livro_id)
-     DO UPDATE SET quantidade = itens_carrinho.quantidade + EXCLUDED.quantidade`,
-    [carrinhoId, livroId, quantidade],
+    `INSERT INTO cart_items (cart_id, book_id, quantity)
+     SELECT id, $2, $3 FROM carts WHERE session_id = $1
+     ON CONFLICT (cart_id, book_id)
+     DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity`,
+    [sessionId, bookId, quantity],
   );
+  return viewCart(pool, sessionId);
 }
 
-export async function alterarQuantidade(
+export async function changeQuantity(
   pool: Pool,
-  carrinhoId: string,
-  livroId: string,
-  quantidade: number,
-): Promise<void> {
+  sessionId: string,
+  bookId: string,
+  quantity: number,
+): Promise<Cart> {
   const result = await pool.query(
-    `UPDATE itens_carrinho SET quantidade = $3
-     WHERE carrinho_id = $1 AND livro_id = $2`,
-    [carrinhoId, livroId, quantidade],
+    `UPDATE cart_items SET quantity = $3
+     WHERE book_id = $2
+       AND cart_id = (SELECT id FROM carts WHERE session_id = $1)`,
+    [sessionId, bookId, quantity],
   );
-  if (result.rowCount === 0) throw new AppError(404, "item_nao_encontrado");
+  if (result.rowCount === 0) throw new AppError(404, "item_not_found");
+  return viewCart(pool, sessionId);
 }
 
-export async function removerItem(pool: Pool, carrinhoId: string, livroId: string): Promise<void> {
+export async function removeItem(pool: Pool, sessionId: string, bookId: string): Promise<Cart> {
   const result = await pool.query(
-    `DELETE FROM itens_carrinho WHERE carrinho_id = $1 AND livro_id = $2`,
-    [carrinhoId, livroId],
+    `DELETE FROM cart_items
+     WHERE book_id = $2
+       AND cart_id = (SELECT id FROM carts WHERE session_id = $1)`,
+    [sessionId, bookId],
   );
-  if (result.rowCount === 0) throw new AppError(404, "item_nao_encontrado");
+  if (result.rowCount === 0) throw new AppError(404, "item_not_found");
+  return viewCart(pool, sessionId);
 }
 
-export async function verCarrinho(pool: Pool, carrinhoId: string): Promise<ItemCarrinho[]> {
+export async function viewCart(pool: Pool, sessionId: string): Promise<Cart> {
   const result = await pool.query<{
-    livro_id: string;
-    titulo: string;
-    quantidade: number;
-    preco_centavos: number;
+    book_id: string;
+    title: string;
+    quantity: number;
+    price_cents: number;
   }>(
-    `SELECT i.livro_id, l.titulo, i.quantidade, l.preco_centavos
-     FROM itens_carrinho i
-     JOIN livros l ON l.id = i.livro_id
-     WHERE i.carrinho_id = $1
-     ORDER BY l.titulo, i.livro_id`,
-    [carrinhoId],
+    `SELECT i.book_id, b.title, i.quantity, b.price_cents
+     FROM carts c
+     JOIN cart_items i ON i.cart_id = c.id
+     JOIN books b ON b.id = i.book_id
+     WHERE c.session_id = $1
+     ORDER BY b.title, i.book_id`,
+    [sessionId],
   );
-  return result.rows.map((row) => ({
-    livroId: row.livro_id,
-    titulo: row.titulo,
-    quantidade: row.quantidade,
-    precoAtualCentavos: row.preco_centavos,
-  }));
+  return {
+    items: result.rows.map((row) => ({
+      bookId: row.book_id,
+      title: row.title,
+      quantity: row.quantity,
+      currentPriceCents: row.price_cents,
+    })),
+  };
 }

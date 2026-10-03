@@ -1,22 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "../db.js";
-import { AppError } from "../shared/errors.js";
-import { atualizarLivro, criarLivro } from "../catalog/repository.js";
-
-type CriarBody = {
-  isbn: string;
-  titulo: string;
-  autor: string;
-  precoCentavos: number;
-  estoque: number;
-};
-
-type AtualizarBody = {
-  titulo?: string;
-  autor?: string;
-  precoCentavos?: number;
-  estoque?: number;
-};
+import { createBook, updateBook, type BookPatch, type NewBook } from "../catalog/repository.js";
 
 export async function registerAdminRoutes(
   app: FastifyInstance,
@@ -24,33 +8,32 @@ export async function registerAdminRoutes(
 ): Promise<void> {
   app.addHook("onRequest", async (request, reply) => {
     if (!request.url.startsWith("/admin")) return;
-    const key = request.headers["x-api-key"];
-    if (key !== options.adminApiKey) {
-      return reply.code(401).send({ erro: "nao_autorizado" });
+    if (request.headers["x-api-key"] !== options.adminApiKey) {
+      return reply.code(401).send({ error: "unauthorized" });
     }
   });
 
-  app.post<{ Body: CriarBody }>("/admin/livros", {
+  app.post<{ Body: NewBook }>("/admin/books", {
     schema: {
       body: {
         type: "object",
-        required: ["isbn", "titulo", "autor", "precoCentavos", "estoque"],
+        required: ["isbn", "title", "author", "priceCents", "stock"],
         additionalProperties: false,
         properties: {
           isbn: { type: "string", minLength: 1 },
-          titulo: { type: "string", minLength: 1 },
-          autor: { type: "string", minLength: 1 },
-          precoCentavos: { type: "integer", minimum: 0 },
-          estoque: { type: "integer", minimum: 0 },
+          title: { type: "string", minLength: 1 },
+          author: { type: "string", minLength: 1 },
+          priceCents: { type: "integer", minimum: 0 },
+          stock: { type: "integer", minimum: 0 },
         },
       },
     },
   }, async (request, reply) => {
-    const livro = await criarLivro(options.pool, request.body);
-    return reply.code(201).send({ livro });
+    const book = await createBook(options.pool, request.body);
+    return reply.code(201).send({ book });
   });
 
-  app.patch<{ Params: { id: string }; Body: AtualizarBody }>("/admin/livros/:id", {
+  app.patch<{ Params: { id: string }; Body: BookPatch }>("/admin/books/:id", {
     schema: {
       params: {
         type: "object",
@@ -62,18 +45,15 @@ export async function registerAdminRoutes(
         additionalProperties: false,
         minProperties: 1,
         properties: {
-          titulo: { type: "string", minLength: 1 },
-          autor: { type: "string", minLength: 1 },
-          precoCentavos: { type: "integer", minimum: 0 },
-          estoque: { type: "integer", minimum: 0 },
+          title: { type: "string", minLength: 1 },
+          author: { type: "string", minLength: 1 },
+          priceCents: { type: "integer", minimum: 0 },
+          stock: { type: "integer", minimum: 0 },
         },
       },
     },
-  }, async (request, reply) => {
-    if (!request.body || Object.keys(request.body).length === 0) {
-      throw new AppError(400, "requisicao_invalida");
-    }
-    const livro = await atualizarLivro(options.pool, request.params.id, request.body);
-    return reply.send({ livro });
+  }, async (request) => {
+    const book = await updateBook(options.pool, request.params.id, request.body);
+    return { book };
   });
 }

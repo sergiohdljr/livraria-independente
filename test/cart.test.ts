@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { cookieDe, comSessao, criarLivro, startApp } from "./helpers.js";
+import { adminApiKey, createBook, sessionCookie, startApp, withSession } from "./helpers.js";
 
 let app: FastifyInstance;
 let pool: Pool;
@@ -15,77 +15,77 @@ afterAll(async () => {
   await pool.end();
 });
 
-test("Comprador monta um Carrinho por Sessão sem reservar Estoque", async () => {
-  const livro = await criarLivro(app, {
+test("a buyer builds a session cart without reserving stock", async () => {
+  const book = await createBook(app, {
     isbn: "9780000000020",
-    titulo: "Capitães da Areia",
-    precoCentavos: 3000,
-    estoque: 2,
+    title: "Captains of the Sands",
+    priceCents: 3000,
+    stock: 2,
   });
 
-  const adicionado = await app.inject({
+  const added = await app.inject({
     method: "POST",
-    url: "/carrinho/itens",
-    payload: { livroId: livro.id, quantidade: 4 },
+    url: "/cart/items",
+    payload: { bookId: book.id, quantity: 4 },
   });
-  expect(adicionado.statusCode).toBe(201);
-  const cookie = cookieDe(adicionado);
-  expect(adicionado.json().itens).toEqual([
+  expect(added.statusCode).toBe(201);
+  const cookie = sessionCookie(added);
+  expect(added.json().items).toEqual([
     {
-      livroId: livro.id,
-      titulo: "Capitães da Areia",
-      quantidade: 4,
-      precoAtualCentavos: 3000,
+      bookId: book.id,
+      title: "Captains of the Sands",
+      quantity: 4,
+      currentPriceCents: 3000,
     },
   ]);
 
-  const alterado = await app.inject(
-    comSessao(cookie, {
+  const changed = await app.inject(
+    withSession(cookie, {
       method: "PATCH",
-      url: `/carrinho/itens/${livro.id}`,
-      payload: { quantidade: 1 },
+      url: `/cart/items/${book.id}`,
+      payload: { quantity: 1 },
     }),
   );
-  expect(alterado.statusCode).toBe(200);
-  expect(alterado.json().itens[0].quantidade).toBe(1);
+  expect(changed.statusCode).toBe(200);
+  expect(changed.json().items[0].quantity).toBe(1);
 
-  const visto = await app.inject(comSessao(cookie, { method: "GET", url: "/carrinho" }));
-  expect(visto.json().itens).toHaveLength(1);
+  const viewed = await app.inject(withSession(cookie, { method: "GET", url: "/cart" }));
+  expect(viewed.json().items).toHaveLength(1);
 
-  const removido = await app.inject(
-    comSessao(cookie, { method: "DELETE", url: `/carrinho/itens/${livro.id}` }),
+  const removed = await app.inject(
+    withSession(cookie, { method: "DELETE", url: `/cart/items/${book.id}` }),
   );
-  expect(removido.json().itens).toEqual([]);
+  expect(removed.json().items).toEqual([]);
 
-  const detalhe = await app.inject({ method: "GET", url: `/livros/${livro.id}` });
-  expect(detalhe.json().livro.estoque).toBe(2);
+  const detail = await app.inject({ method: "GET", url: `/books/${book.id}` });
+  expect(detail.json().book.stock).toBe(2);
 });
 
-test("preço no Carrinho acompanha o catálogo e não reserva Estoque", async () => {
-  const livro = await criarLivro(app, {
+test("the cart shows the current catalog price and does not reserve stock", async () => {
+  const book = await createBook(app, {
     isbn: "9780000000021",
-    titulo: "Preço vivo",
-    precoCentavos: 1000,
-    estoque: 6,
+    title: "Live price",
+    priceCents: 1000,
+    stock: 6,
   });
-  const adicionado = await app.inject({
+  const added = await app.inject({
     method: "POST",
-    url: "/carrinho/itens",
-    payload: { livroId: livro.id, quantidade: 2 },
+    url: "/cart/items",
+    payload: { bookId: book.id, quantity: 2 },
   });
-  const cookie = cookieDe(adicionado);
+  const cookie = sessionCookie(added);
 
-  const reajuste = await app.inject({
+  const repriced = await app.inject({
     method: "PATCH",
-    url: `/admin/livros/${livro.id}`,
-    headers: { "x-api-key": "test-key" },
-    payload: { precoCentavos: 1800 },
+    url: `/admin/books/${book.id}`,
+    headers: { "x-api-key": adminApiKey },
+    payload: { priceCents: 1800 },
   });
-  expect(reajuste.statusCode).toBe(200);
+  expect(repriced.statusCode).toBe(200);
 
-  const visto = await app.inject(comSessao(cookie, { method: "GET", url: "/carrinho" }));
-  expect(visto.json().itens[0].precoAtualCentavos).toBe(1800);
+  const viewed = await app.inject(withSession(cookie, { method: "GET", url: "/cart" }));
+  expect(viewed.json().items[0].currentPriceCents).toBe(1800);
 
-  const detalhe = await app.inject({ method: "GET", url: `/livros/${livro.id}` });
-  expect(detalhe.json().livro.estoque).toBe(6);
+  const detail = await app.inject({ method: "GET", url: `/books/${book.id}` });
+  expect(detail.json().book.stock).toBe(6);
 });
