@@ -21,7 +21,7 @@ Pessoa autenticada que cria/edita Livros e ajusta Estoque.
 _Avoid_: Operador, Backoffice user
 
 **Carrinho**:
-Coleção persistida de intenções de compra de um Comprador anônimo, identificada por sessão; não reserva Estoque.
+Coleção persistida de intenções de compra de um Comprador anônimo, identificada por sessão; não reserva Estoque. Se ainda contém as mesmas linhas de um Pedido `criado` da mesma Sessão, outro checkout devolve esse Pedido e não gera outro Pagamento.
 _Avoid_: Pedido pendente, Wishlist, Basket
 
 **Sessão**:
@@ -29,11 +29,11 @@ Identificador anônimo que amarra o Comprador ao seu Carrinho entre requisiçõe
 _Avoid_: Conta, Login, User id
 
 **Pedido**:
-Registro imutável da compra concluída no checkout, com dados do Comprador, itens com preço congelado, frete e total; nasce como `criado` quando o Estoque é debitado.
+Registro imutável da compra concluída no checkout, com dados do Comprador, itens com preço congelado, frete e total. Nasce como `criado` quando o Estoque é debitado e refere-se a um único Pagamento `aceito` cujo valor é esse total.
 _Avoid_: Compra, Transação, Order pending, Carrinho finalizado
 
 **Item de Pedido**:
-Linha imutável de um Pedido: Livro (referência), quantidade e preço unitário no momento do checkout.
+Linha imutável de um Pedido: Livro (referência), quantidade e preço unitário da cotação que foi cobrada.
 _Avoid_: Item de Carrinho, Linha de fatura
 
 **Item de Carrinho**:
@@ -49,5 +49,5 @@ Código postal do endereço de entrega; válido para checkout só se pertencer a
 _Avoid_: Endereço completo (o CEP é o critério de frete; o endereço textual é dado do Pedido)
 
 **Pagamento**:
-Cobrança simulada do valor total do Pedido, sem escolha de meio pelo Comprador nesta fase; persiste status `aceito` ou `recusado` e o valor tentado.
+Cobrança do total cotado no checkout, sem escolha de meio pelo Comprador nesta fase. Persiste status `aceito` ou `recusado` e o valor tentado. Um `recusado` não tem Pedido. Um `aceito` tem no máximo um Pedido.
 _Avoid_: Gateway, Transação financeira, Invoice, Meio de pagamento (como escolha do Comprador no Incremento 0)

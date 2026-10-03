@@ -1,18 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Pool } from "pg";
 import { adminApiKey, createBook, sessionCookie, startApp, withSession } from "./helpers.js";
 
 let app: FastifyInstance;
-let pool: Pool;
+let close: () => Promise<void>;
 
 beforeAll(async () => {
-  ({ app, pool } = await startApp());
+  ({ app, close } = await startApp());
 });
 
 afterAll(async () => {
-  await app.close();
-  await pool.end();
+  await close();
 });
 
 const delivery = {
@@ -169,4 +167,29 @@ test("concurrent checkouts cannot sell the last copy twice", async () => {
 
   const detail = await app.inject({ method: "GET", url: `/books/${book.id}` });
   expect(detail.json().book.stock).toBe(0);
+});
+
+test("the public host does not expose stock debit", async () => {
+  const response = await app.inject({
+    method: "POST",
+    url: "/internal/stock/debit",
+    headers: { "x-internal-key": "test-internal-key" },
+    payload: { lines: [] },
+  });
+  expect(response.statusCode).toBe(404);
+});
+
+test("two overlapping checkouts for one session charge only once", async () => {
+  const book = await createBook(app, { isbn: "9780000000036", title: "One charge", stock: 5, priceCents: 500 });
+  const cookie = await cartWith(book.id, 1);
+
+  const [a, b] = await Promise.all([
+    app.inject(withSession(cookie, { method: "POST", url: "/checkout", payload: delivery })),
+    app.inject(withSession(cookie, { method: "POST", url: "/checkout", payload: delivery })),
+  ]);
+
+  const statuses = [a.statusCode, b.statusCode].sort();
+  expect(statuses).toEqual([201, 422]);
+  const detail = await app.inject({ method: "GET", url: `/books/${book.id}` });
+  expect(detail.json().book.stock).toBe(4);
 });

@@ -1,18 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Pool } from "pg";
 import { adminApiKey, createBook, startApp } from "./helpers.js";
 
 let app: FastifyInstance;
-let pool: Pool;
+let close: () => Promise<void>;
 
 beforeAll(async () => {
-  ({ app, pool } = await startApp());
+  ({ app, close } = await startApp());
 });
 
 afterAll(async () => {
-  await app.close();
-  await pool.end();
+  await close();
 });
 
 test("an admin with an API key creates a book and a buyer can list and open it", async () => {
