@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Db, Pool } from "../db.js";
+import type { Pool } from "../db.js";
 import type { EmailPort } from "../email/fake.js";
-import type { PaymentPort, PaymentStatus } from "../payment/fake.js";
 import { AppError } from "../shared/errors.js";
 
 export type OrderItem = {
@@ -24,57 +23,88 @@ export type Order = {
   items: OrderItem[];
 };
 
-export type CheckoutInput = {
-  sessionId: string;
-  postalCode: string;
-  address: string;
-  email: string;
-  simulate?: PaymentStatus;
-};
-
 export type CheckoutResult = {
   order: Order;
   payment: { status: "accepted"; amountCents: number };
   emailConfirmation: "sent" | "failed";
 };
 
-type CartLine = {
-  book_id: string;
+type QuoteLine = {
+  bookId: string;
   quantity: number;
   isbn: string;
   title: string;
   author: string;
-  price_cents: number;
+  unitPriceCents: number;
   stock: number;
+};
+
+type Remote = {
+  catalogBaseUrl: string;
+  cartBaseUrl: string;
+  paymentBaseUrl: string;
+  internalApiKey: string;
 };
 
 export async function checkout(
   pool: Pool,
-  payment: PaymentPort,
   email: EmailPort,
-  input: CheckoutInput,
+  remote: Remote,
+  input: { sessionId: string; postalCode: string; address: string; email: string; simulate?: "accepted" | "declined" },
 ): Promise<CheckoutResult> {
   const postalCode = normalizePostalCode(input.postalCode);
-  const shippingCents = await shippingForPostalCode(pool, postalCode);
-  const lines = await loadCartLines(pool, input.sessionId, false);
-  if (lines.length === 0) throw new AppError(422, "empty_cart");
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtext($1))", [input.sessionId]);
 
-  for (const line of lines) {
-    if (line.quantity > line.stock) throw new AppError(409, "insufficient_stock");
+    const shippingCents = await shippingForPostalCode(client, postalCode);
+    const lines = await quoteLines(remote, input.sessionId);
+    if (lines.length === 0) throw new AppError(422, "empty_cart");
+    if (lines.some((line) => line.quantity > line.stock)) throw new AppError(409, "insufficient_stock");
+
+    const existing = await findMatchingOrder(client, input.sessionId, lines);
+    if (existing) {
+      await clearCart(remote, input.sessionId);
+      return {
+        order: existing,
+        payment: { status: "accepted", amountCents: existing.totalCents },
+        emailConfirmation: "sent",
+      };
+    }
+
+    const totalCents = lines.reduce((sum, line) => sum + line.quantity * line.unitPriceCents, 0) + shippingCents;
+    const charge = await createCharge(remote, totalCents, input.simulate);
+    if (charge.status === "declined") throw new AppError(402, "payment_declined");
+
+    const stockLines = lines.map((line) => ({ bookId: line.bookId, quantity: line.quantity }));
+    const debited = await postStock(remote, "debit", stockLines);
+    if (!debited) {
+      console.error(`payment accepted without order session=${input.sessionId} amount=${charge.amountCents}`);
+      throw new AppError(409, "insufficient_stock");
+    }
+
+    let order: Order;
+    try {
+      order = await insertOrder(client, input, postalCode, shippingCents, totalCents, charge.id, lines);
+    } catch (error) {
+      const restored = await postStock(remote, "restore", stockLines);
+      console.error(`payment accepted without order session=${input.sessionId} amount=${charge.amountCents}`);
+      if (!restored) throw new AppError(500, "internal_error");
+      throw error;
+    }
+
+    const cleared = await clearCart(remote, input.sessionId);
+    if (!cleared) console.error(`cart not cleared session=${input.sessionId} order=${order.id}`);
+    const emailConfirmation = await confirmByEmail(email, input.email, order);
+    return {
+      order,
+      payment: { status: "accepted", amountCents: charge.amountCents },
+      emailConfirmation,
+    };
+  } finally {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [input.sessionId]);
+    client.release();
   }
-
-  const quotedTotal = lineTotal(lines) + shippingCents;
-  const charge = await payment.charge({ amountCents: quotedTotal, simulate: input.simulate });
-  if (charge.status === "declined") throw new AppError(402, "payment_declined");
-
-  const order = await persistOrder(pool, input, postalCode, shippingCents, charge.amountCents);
-  const emailConfirmation = await confirmByEmail(email, input.email, order);
-
-  return {
-    order,
-    payment: { status: "accepted", amountCents: charge.amountCents },
-    emailConfirmation,
-  };
 }
 
 export async function getOrder(pool: Pool, sessionId: string, orderId: string): Promise<Order> {
@@ -87,89 +117,108 @@ export async function getOrder(pool: Pool, sessionId: string, orderId: string): 
     total_cents: number;
   }>(
     `SELECT id, postal_code, address, email, shipping_cents, total_cents
-     FROM orders WHERE id = $1 AND session_id = $2`,
+     FROM checkout.orders WHERE id = $1 AND session_id = $2`,
     [orderId, sessionId],
   );
   const row = found.rows[0];
   if (!row) throw new AppError(404, "order_not_found");
-
-  const items = await pool.query<{
-    book_id: string;
-    isbn: string;
-    title: string;
-    author: string;
-    quantity: number;
-    unit_price_cents: number;
-  }>(
-    `SELECT book_id, isbn, title, author, quantity, unit_price_cents
-     FROM order_items WHERE order_id = $1 ORDER BY title, book_id`,
-    [orderId],
-  );
-
-  return {
-    id: row.id,
-    status: "created",
-    postalCode: row.postal_code,
-    address: row.address,
-    email: row.email,
-    shippingCents: row.shipping_cents,
-    totalCents: row.total_cents,
-    items: items.rows.map(toOrderItem),
-  };
+  const items = await loadItems(pool, orderId);
+  return toOrder(row, items);
 }
 
-async function persistOrder(
-  pool: Pool,
-  input: CheckoutInput,
+async function quoteLines(remote: Remote, sessionId: string): Promise<QuoteLine[]> {
+  const cart = await fetch(`${remote.cartBaseUrl}/internal/carts/${sessionId}`, {
+    headers: { "x-internal-key": remote.internalApiKey },
+  });
+  if (!cart.ok) throw new AppError(500, "internal_error");
+  const body = await cart.json() as { items: Array<{ bookId: string; quantity: number }> };
+  const lines: QuoteLine[] = [];
+  for (const item of body.items) {
+    const response = await fetch(`${remote.catalogBaseUrl}/books/${item.bookId}`);
+    if (!response.ok) throw new AppError(500, "internal_error");
+    const book = (await response.json() as { book: { isbn: string; title: string; author: string; priceCents: number; stock: number } }).book;
+    lines.push({
+      bookId: item.bookId,
+      quantity: item.quantity,
+      isbn: book.isbn,
+      title: book.title,
+      author: book.author,
+      unitPriceCents: book.priceCents,
+      stock: book.stock,
+    });
+  }
+  return lines;
+}
+
+async function createCharge(remote: Remote, amountCents: number, simulate?: "accepted" | "declined") {
+  const response = await fetch(`${remote.paymentBaseUrl}/internal/charges`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-internal-key": remote.internalApiKey,
+    },
+    body: JSON.stringify({ amountCents, simulate }),
+  });
+  if (!response.ok) throw new AppError(500, "internal_error");
+  return await response.json() as { id: string; status: "accepted" | "declined"; amountCents: number };
+}
+
+async function postStock(remote: Remote, action: "debit" | "restore", lines: Array<{ bookId: string; quantity: number }>): Promise<boolean> {
+  const response = await fetch(`${remote.catalogBaseUrl}/internal/stock/${action}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-internal-key": remote.internalApiKey,
+    },
+    body: JSON.stringify({ lines }),
+  });
+  return response.ok;
+}
+
+async function clearCart(remote: Remote, sessionId: string): Promise<boolean> {
+  const response = await fetch(`${remote.cartBaseUrl}/internal/carts/${sessionId}`, {
+    method: "DELETE",
+    headers: { "x-internal-key": remote.internalApiKey },
+  });
+  return response.ok;
+}
+
+async function insertOrder(
+  client: import("pg").PoolClient,
+  input: { sessionId: string; address: string; email: string },
   postalCode: string,
   shippingCents: number,
-  chargedCents: number,
+  totalCents: number,
+  paymentId: string,
+  lines: QuoteLine[],
 ): Promise<Order> {
-  const client = await pool.connect();
+  const orderId = randomUUID();
+  await client.query("BEGIN");
   try {
-    await client.query("BEGIN");
-    const locked = await loadCartLines(client, input.sessionId, true);
-    if (locked.length === 0) throw new AppError(422, "empty_cart");
-
-    for (const line of locked) {
-      if (line.quantity > line.stock) rejectPaidCheckout(input.sessionId, chargedCents, "insufficient_stock");
-    }
-
-    const totalCents = lineTotal(locked) + shippingCents;
-    if (totalCents !== chargedCents) rejectPaidCheckout(input.sessionId, chargedCents, "checkout_conflict");
-
-    const orderId = randomUUID();
-    const items = locked.map(toOrderItem);
     await client.query(
-      `INSERT INTO orders (id, session_id, status, postal_code, address, email, shipping_cents, total_cents)
-       VALUES ($1, $2, 'created', $3, $4, $5, $6, $7)`,
-      [orderId, input.sessionId, postalCode, input.address, input.email, shippingCents, totalCents],
+      `INSERT INTO checkout.orders
+         (id, session_id, status, postal_code, address, email, shipping_cents, total_cents, payment_id)
+       VALUES ($1, $2, 'created', $3, $4, $5, $6, $7, $8)`,
+      [orderId, input.sessionId, postalCode, input.address, input.email, shippingCents, totalCents, paymentId],
     );
-
-    for (const item of items) {
+    const items: OrderItem[] = [];
+    for (const line of lines) {
+      items.push({
+        bookId: line.bookId,
+        isbn: line.isbn,
+        title: line.title,
+        author: line.author,
+        quantity: line.quantity,
+        unitPriceCents: line.unitPriceCents,
+      });
       await client.query(
-        `INSERT INTO order_items
+        `INSERT INTO checkout.order_items
            (id, order_id, book_id, isbn, title, author, quantity, unit_price_cents)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [randomUUID(), orderId, item.bookId, item.isbn, item.title, item.author, item.quantity, item.unitPriceCents],
+        [randomUUID(), orderId, line.bookId, line.isbn, line.title, line.author, line.quantity, line.unitPriceCents],
       );
-      const debit = await client.query(
-        `UPDATE books SET stock = stock - $2 WHERE id = $1 AND stock >= $2`,
-        [item.bookId, item.quantity],
-      );
-      if (debit.rowCount !== 1) rejectPaidCheckout(input.sessionId, chargedCents, "insufficient_stock");
     }
-
-    await client.query(
-      `INSERT INTO payments (id, order_id, status, amount_cents) VALUES ($1, $2, 'accepted', $3)`,
-      [randomUUID(), orderId, totalCents],
-    );
-    await client.query(
-      `DELETE FROM cart_items WHERE cart_id = (SELECT id FROM carts WHERE session_id = $1)`,
-      [input.sessionId],
-    );
     await client.query("COMMIT");
-
     return {
       id: orderId,
       status: "created",
@@ -183,66 +232,84 @@ async function persistOrder(
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
-  } finally {
-    client.release();
   }
 }
 
-async function confirmByEmail(
-  email: EmailPort,
-  to: string,
-  order: Order,
-): Promise<"sent" | "failed"> {
-  try {
-    await email.sendOrderConfirmation({ to, orderId: order.id, totalCents: order.totalCents });
-    return "sent";
-  } catch (error) {
-    console.error(`order confirmation failed order=${order.id}`, error);
-    return "failed";
+async function findMatchingOrder(client: import("pg").PoolClient, sessionId: string, lines: QuoteLine[]): Promise<Order | undefined> {
+  const orders = await client.query<{
+    id: string;
+    postal_code: string;
+    address: string;
+    email: string;
+    shipping_cents: number;
+    total_cents: number;
+  }>(
+    `SELECT id, postal_code, address, email, shipping_cents, total_cents
+     FROM checkout.orders WHERE session_id = $1 ORDER BY id`,
+    [sessionId],
+  );
+  const wanted = lines.map((line) => `${line.bookId}:${line.quantity}`).sort().join("|");
+  for (const row of orders.rows) {
+    const items = await loadItems(client, row.id);
+    const have = items.map((item) => `${item.bookId}:${item.quantity}`).sort().join("|");
+    if (have === wanted) return toOrder(row, items);
   }
+  return undefined;
 }
 
-const CART_LINES_SQL = `
-  SELECT i.book_id, i.quantity, b.isbn, b.title, b.author, b.price_cents, b.stock
-  FROM carts c
-  JOIN cart_items i ON i.cart_id = c.id
-  JOIN books b ON b.id = i.book_id
-  WHERE c.session_id = $1
-  ORDER BY i.book_id
-`;
-
-async function loadCartLines(db: Db, sessionId: string, lock: boolean): Promise<CartLine[]> {
-  const sql = lock ? `${CART_LINES_SQL} FOR UPDATE OF b` : CART_LINES_SQL;
-  const result = await db.query<CartLine>(sql, [sessionId]);
-  return result.rows;
+async function loadItems(db: Pool | import("pg").PoolClient, orderId: string): Promise<OrderItem[]> {
+  const items = await db.query<{
+    book_id: string;
+    isbn: string;
+    title: string;
+    author: string;
+    quantity: number;
+    unit_price_cents: number;
+  }>(
+    `SELECT book_id, isbn, title, author, quantity, unit_price_cents
+     FROM checkout.order_items WHERE order_id = $1 ORDER BY title, book_id`,
+    [orderId],
+  );
+  return items.rows.map((item) => ({
+    bookId: item.book_id,
+    isbn: item.isbn,
+    title: item.title,
+    author: item.author,
+    quantity: item.quantity,
+    unitPriceCents: item.unit_price_cents,
+  }));
 }
 
-function rejectPaidCheckout(sessionId: string, chargedCents: number, code: "insufficient_stock" | "checkout_conflict"): never {
-  console.error(`payment accepted without order session=${sessionId} amount=${chargedCents}`);
-  throw new AppError(409, code);
-}
-
-function lineTotal(lines: Array<{ quantity: number; price_cents: number }>): number {
-  return lines.reduce((sum, line) => sum + line.quantity * line.price_cents, 0);
-}
-
-function toOrderItem(line: {
-  book_id: string;
-  isbn: string;
-  title: string;
-  author: string;
-  quantity: number;
-  price_cents?: number;
-  unit_price_cents?: number;
-}): OrderItem {
+function toOrder(row: {
+  id: string;
+  postal_code: string;
+  address: string;
+  email: string;
+  shipping_cents: number;
+  total_cents: number;
+}, items: OrderItem[]): Order {
   return {
-    bookId: line.book_id,
-    isbn: line.isbn,
-    title: line.title,
-    author: line.author,
-    quantity: line.quantity,
-    unitPriceCents: line.unit_price_cents ?? line.price_cents ?? 0,
+    id: row.id,
+    status: "created",
+    postalCode: row.postal_code,
+    address: row.address,
+    email: row.email,
+    shippingCents: row.shipping_cents,
+    totalCents: row.total_cents,
+    items,
   };
+}
+
+async function shippingForPostalCode(client: import("pg").PoolClient, postalCode: string): Promise<number> {
+  const result = await client.query<{ amount_cents: number }>(
+    `SELECT amount_cents FROM checkout.shipping_rates
+     WHERE $1 BETWEEN postal_code_start AND postal_code_end
+     ORDER BY amount_cents LIMIT 1`,
+    [Number(postalCode)],
+  );
+  const row = result.rows[0];
+  if (!row) throw new AppError(422, "shipping_unavailable");
+  return row.amount_cents;
 }
 
 function normalizePostalCode(postalCode: string): string {
@@ -251,15 +318,12 @@ function normalizePostalCode(postalCode: string): string {
   return digits;
 }
 
-async function shippingForPostalCode(pool: Pool, postalCode: string): Promise<number> {
-  const result = await pool.query<{ amount_cents: number }>(
-    `SELECT amount_cents FROM shipping_rates
-     WHERE $1 BETWEEN postal_code_start AND postal_code_end
-     ORDER BY amount_cents
-     LIMIT 1`,
-    [Number(postalCode)],
-  );
-  const row = result.rows[0];
-  if (!row) throw new AppError(422, "shipping_unavailable");
-  return row.amount_cents;
+async function confirmByEmail(email: EmailPort, to: string, order: Order): Promise<"sent" | "failed"> {
+  try {
+    await email.sendOrderConfirmation({ to, orderId: order.id, totalCents: order.totalCents });
+    return "sent";
+  } catch (error) {
+    console.error(`order confirmation failed order=${order.id}`, error);
+    return "failed";
+  }
 }

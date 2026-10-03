@@ -1,7 +1,5 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
-import type { Pool } from "pg";
-import { buildApp } from "../src/app.js";
-import { createPool, migrate, resetData } from "../src/db.js";
+import { startCluster } from "../src/cluster.js";
 
 export const databaseUrl =
   process.env.DATABASE_URL ??
@@ -18,12 +16,14 @@ export type Book = {
   stock: number;
 };
 
-export async function startApp(): Promise<{ app: FastifyInstance; pool: Pool }> {
-  const pool = createPool(databaseUrl);
-  await migrate(pool);
-  await resetData(pool);
-  const app = await buildApp({ pool, adminApiKey, logger: false });
-  return { app, pool };
+export async function startApp(): Promise<{ app: FastifyInstance; close: () => Promise<void> }> {
+  const cluster = await startCluster({
+    databaseUrl,
+    adminApiKey,
+    internalApiKey: "test-internal-key",
+    reset: true,
+  });
+  return { app: cluster.gateway, close: cluster.close };
 }
 
 export async function createBook(

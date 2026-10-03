@@ -1,23 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Pool } from "pg";
-import { buildApp } from "../src/app.js";
-import { createPool, migrate } from "../src/db.js";
+import { startCluster } from "../src/cluster.js";
 
 const databaseUrl =
   process.env.DATABASE_URL ??
   "postgres://movielogger:movielogger@localhost:5432/livraria_independente_test";
 
-let pool: Pool;
 let app: FastifyInstance;
+let close: () => Promise<void>;
 const logLines: string[] = [];
 
 beforeAll(async () => {
-  pool = createPool(databaseUrl);
-  await migrate(pool);
-  app = await buildApp({
-    pool,
+  const cluster = await startCluster({
+    databaseUrl,
     adminApiKey: "test-key",
+    internalApiKey: "test-internal-key",
     logger: {
       level: "info",
       stream: {
@@ -27,11 +24,12 @@ beforeAll(async () => {
       },
     },
   });
+  app = cluster.gateway;
+  close = cluster.close;
 });
 
 afterAll(async () => {
-  await app.close();
-  await pool.end();
+  await close();
 });
 
 test("a request is logged and the API answers", async () => {

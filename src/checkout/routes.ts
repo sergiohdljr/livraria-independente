@@ -1,10 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "../db.js";
 import type { EmailPort } from "../email/fake.js";
-import type { PaymentPort, PaymentStatus } from "../payment/fake.js";
 import { AppError } from "../shared/errors.js";
-import { readSessionId } from "../session.js";
 import { checkout, getOrder } from "./service.js";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type CheckoutBody = {
   postalCode: string;
@@ -14,7 +14,14 @@ type CheckoutBody = {
 
 export async function registerCheckoutRoutes(
   app: FastifyInstance,
-  deps: { pool: Pool; payment: PaymentPort; email: EmailPort },
+  deps: {
+    pool: Pool;
+    email: EmailPort;
+    catalogBaseUrl: string;
+    cartBaseUrl: string;
+    paymentBaseUrl: string;
+    internalApiKey: string;
+  },
 ): Promise<void> {
   app.post<{ Body: CheckoutBody }>("/checkout", {
     schema: {
@@ -30,14 +37,16 @@ export async function registerCheckoutRoutes(
       },
     },
   }, async (request, reply) => {
-    const sessionId = readSessionId(request);
+    const sessionId = readSessionId(request.cookies["session"]);
     if (!sessionId) throw new AppError(422, "empty_cart");
-    const result = await checkout(deps.pool, deps.payment, deps.email, {
+    const header = request.headers["x-payment-simulation"];
+    const simulate = header === "accepted" || header === "declined" ? header : undefined;
+    const result = await checkout(deps.pool, deps.email, deps, {
       sessionId,
       postalCode: request.body.postalCode,
       address: request.body.address,
       email: request.body.email,
-      simulate: simulatedPayment(request.headers["x-payment-simulation"]),
+      simulate,
     });
     return reply.code(201).send(result);
   });
@@ -51,15 +60,12 @@ export async function registerCheckoutRoutes(
       },
     },
   }, async (request) => {
-    const sessionId = readSessionId(request);
+    const sessionId = readSessionId(request.cookies["session"]);
     if (!sessionId) throw new AppError(404, "order_not_found");
-    const order = await getOrder(deps.pool, sessionId, request.params.id);
-    return { order };
+    return { order: await getOrder(deps.pool, sessionId, request.params.id) };
   });
 }
 
-function simulatedPayment(header: string | string[] | undefined): PaymentStatus | undefined {
-  const value = Array.isArray(header) ? header[0] : header;
-  if (value === "accepted" || value === "declined") return value;
-  return undefined;
+function readSessionId(value: string | undefined): string | undefined {
+  return value && UUID.test(value) ? value : undefined;
 }

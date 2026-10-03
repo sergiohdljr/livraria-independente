@@ -1,0 +1,5 @@
+# Um Postgres, um schema privado por serviço
+
+Catálogo, Carrinho, Checkout e Pagamento passam a ser processos que se chamam por HTTP JSON síncrono. O banco continua um só Postgres, com um schema por serviço (`catalog`, `cart`, `checkout`, `payment`). Cada processo usa um papel que só enxerga o próprio schema: sem leitura, escrita ou transação cruzada. Checkout muda Estoque só chamando Catálogo por HTTP. E-mail segue como porta dentro de Checkout, não como serviço. O schema `payment` é o único lugar que persiste Pagamento (`aceito` ou `recusado`, e o valor tentado). O Pedido guarda o total e o id devolvido por essa chamada, não uma cópia da cobrança.
+
+Isso supera, neste corte, a parte de ADR-0001 e ADR-0006 que fixa um processo e tabelas compartilhadas. Alternativas rejeitadas: tabelas no mesmo schema (monólito distribuído) e um database por serviço (isolamento maior, custo operacional antes da conta). Consequência: a transação única de ADR-0007 não atravessa serviços; falha depois de Pagamento `aceito` precisa de um protocolo explícito entre chamadas HTTP.
