@@ -20,14 +20,64 @@ Checkout is the only public host. It owns the order, the shipping quote, and the
 
 Cart stores `book_id` with no foreign key to `catalog.books`. It asks catalog over HTTP for the current title and price. Payment is the only store of charge status and amount. The order keeps the total and the returned payment id.
 
-Checkout holds a Postgres advisory lock on the session before it charges. The sequence is:
+`POST /checkout` locks the session, then talks to the other services over HTTP. The lock is released when that request finishes.
 
-1. Read the cart, the books, and the shipping rate.
-2. If the cart still has the same lines as an existing order for that session, return that order. Do not charge again.
-3. Charge payment. A decline stops here: no order, stock unchanged, cart kept.
-4. Debit every line in one catalog transaction. If that fails, there is no order and no refund.
-5. Insert the order with the quoted prices and the payment id. If the insert fails, catalog restores the stock.
-6. Clear the cart, then send the confirmation email. A failed clear or a failed email leaves the order in place.
+```mermaid
+sequenceDiagram
+    actor Buyer
+    participant Checkout
+    participant Cart
+    participant Catalog
+    participant Payment
+
+    Buyer->>Checkout: POST /checkout
+    Checkout->>Checkout: pg_advisory_lock(session)
+    Checkout->>Checkout: read shipping rate
+    alt no shipping rate
+        Checkout-->>Buyer: 422 shipping_unavailable
+    else rate found
+        Checkout->>Cart: GET /internal/carts/:sessionId
+        Cart-->>Checkout: bookId, quantity
+        loop each line
+            Checkout->>Catalog: GET /books/:id
+            Catalog-->>Checkout: price, stock
+        end
+        alt cart is empty
+            Checkout-->>Buyer: 422 empty_cart
+        else same lines as an existing order
+            Checkout->>Cart: DELETE /internal/carts/:sessionId
+            Checkout->>Checkout: log order confirmation
+            Checkout-->>Buyer: 201 existing order
+        else quantity exceeds stock
+            Checkout-->>Buyer: 409 insufficient_stock
+        else new order
+            Checkout->>Payment: POST /internal/charges
+            alt declined
+                Payment-->>Checkout: declined
+                Checkout-->>Buyer: 402 payment_declined
+            else accepted
+                Payment-->>Checkout: accepted, id
+                Checkout->>Catalog: POST /internal/stock/debit
+                alt debit refused
+                    Checkout-->>Buyer: 409 insufficient_stock
+                else debited
+                    Checkout->>Checkout: insert order with quoted prices
+                    alt insert fails
+                        Checkout->>Catalog: POST /internal/stock/restore
+                        Checkout-->>Buyer: 500 internal_error
+                    else stored
+                        Checkout->>Cart: DELETE /internal/carts/:sessionId
+                        Checkout->>Checkout: log order confirmation
+                        Checkout-->>Buyer: 201 order
+                    end
+                end
+            end
+        end
+    end
+    Checkout->>Checkout: pg_advisory_unlock(session)
+```
+
+A failed cart clear or a failed email still returns the order. A debit that fails after an accepted charge does not refund. If the order insert fails and the stock restore also fails, the response is `500` and the log says stock was debited with no order.
 
 Money is integer cents. The email adapter only logs `order-confirmation to=...`.
 
