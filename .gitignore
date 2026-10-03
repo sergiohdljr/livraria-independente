@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.Python
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+service-account*.json
+
+# Build / cache
+dist/
+build/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+.cache/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local scratch (issue tracker uses this only for local-markdown mode)
+.scratch/

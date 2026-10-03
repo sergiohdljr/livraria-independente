@@ -1,0 +1,3 @@
+# Monólito modular primeiro; microsserviços só por incremento de estudo
+
+O diagrama conceitual sugere serviços Catálogo, Carrinho/Checkout e Admin separados. Como o objetivo é estudo iterativo de microsserviços, decidimos começar com **um processo e um banco**, módulos com fronteiras explícitas (`catalog`, `cart`, `checkout`, `admin`, `email`), e só extrair processos/filas/bancos quando o conceito correspondente entrar no aprendizado. Alternativas rejeitadas: serviços + DB compartilhado (monólito distribuído cedo demais) e serviços + DBs separados no dia 1 (custo de orquestração antes do domínio estabilizar).
