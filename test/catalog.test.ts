@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { adminApiKey, criarLivro, startApp } from "./helpers.js";
+import { adminApiKey, createBook, startApp } from "./helpers.js";
 
 let app: FastifyInstance;
 let pool: Pool;
@@ -15,89 +15,88 @@ afterAll(async () => {
   await pool.end();
 });
 
-test("Admin com API key cria um Livro e o Comprador lista e abre o detalhe", async () => {
-  const criado = await criarLivro(app, {
+test("an admin with an API key creates a book and a buyer can list and open it", async () => {
+  const created = await createBook(app, {
     isbn: "9780000000001",
-    titulo: "Dom Casmurro",
-    autor: "Machado de Assis",
-    precoCentavos: 4500,
-    estoque: 3,
+    title: "Dom Casmurro",
+    author: "Machado de Assis",
+    priceCents: 4500,
+    stock: 3,
   });
 
-  const lista = await app.inject({ method: "GET", url: "/livros" });
-  expect(lista.statusCode).toBe(200);
-  expect(lista.json().livros).toContainEqual({
-    id: criado.id,
+  const list = await app.inject({ method: "GET", url: "/books" });
+  expect(list.statusCode).toBe(200);
+  expect(list.json().books).toContainEqual({
+    id: created.id,
     isbn: "9780000000001",
-    titulo: "Dom Casmurro",
-    autor: "Machado de Assis",
-    precoCentavos: 4500,
-    estoque: 3,
+    title: "Dom Casmurro",
+    author: "Machado de Assis",
+    priceCents: 4500,
+    stock: 3,
   });
 
-  const detalhe = await app.inject({ method: "GET", url: `/livros/${criado.id}` });
-  expect(detalhe.statusCode).toBe(200);
-  expect(detalhe.json().livro.estoque).toBe(3);
+  const detail = await app.inject({ method: "GET", url: `/books/${created.id}` });
+  expect(detail.statusCode).toBe(200);
+  expect(detail.json().book.stock).toBe(3);
 });
 
-test("escrita de Livro sem API key é recusada", async () => {
+test("creating a book without an API key is rejected", async () => {
   const response = await app.inject({
     method: "POST",
-    url: "/admin/livros",
+    url: "/admin/books",
     payload: {
       isbn: "9780000000002",
-      titulo: "Sem chave",
-      autor: "Ninguém",
-      precoCentavos: 1000,
-      estoque: 1,
+      title: "No key",
+      author: "Nobody",
+      priceCents: 1000,
+      stock: 1,
     },
   });
 
   expect(response.statusCode).toBe(401);
-  expect(response.json()).toEqual({ erro: "nao_autorizado" });
-  expect(adminApiKey).not.toBe("");
+  expect(response.json()).toEqual({ error: "unauthorized" });
 });
 
-test("Admin atualiza metadados, preço e Estoque", async () => {
-  const livro = await criarLivro(app, { isbn: "9780000000003", titulo: "Antigo", estoque: 2 });
+test("an admin updates title, price, and stock", async () => {
+  const book = await createBook(app, { isbn: "9780000000003", title: "Old title", stock: 2 });
 
-  const atualizado = await app.inject({
+  const updated = await app.inject({
     method: "PATCH",
-    url: `/admin/livros/${livro.id}`,
+    url: `/admin/books/${book.id}`,
     headers: { "x-api-key": adminApiKey },
-    payload: { titulo: "Novo título", precoCentavos: 2200, estoque: 9 },
+    payload: { title: "New title", priceCents: 2200, stock: 9 },
   });
 
-  expect(atualizado.statusCode).toBe(200);
-  expect(atualizado.json().livro).toMatchObject({
-    titulo: "Novo título",
-    precoCentavos: 2200,
-    estoque: 9,
+  expect(updated.statusCode).toBe(200);
+  expect(updated.json().book).toMatchObject({
+    title: "New title",
+    priceCents: 2200,
+    stock: 9,
   });
 
-  const semChave = await app.inject({
+  const withoutKey = await app.inject({
     method: "PATCH",
-    url: `/admin/livros/${livro.id}`,
-    payload: { estoque: 0 },
+    url: `/admin/books/${book.id}`,
+    payload: { stock: 0 },
   });
-  expect(semChave.statusCode).toBe(401);
+  expect(withoutKey.statusCode).toBe(401);
 
-  const detalhe = await app.inject({ method: "GET", url: `/livros/${livro.id}` });
-  expect(detalhe.json().livro.estoque).toBe(9);
+  const detail = await app.inject({ method: "GET", url: `/books/${book.id}` });
+  expect(detail.json().book.stock).toBe(9);
 });
 
-test("Comprador busca por texto e filtra por disponibilidade", async () => {
-  await criarLivro(app, { isbn: "9780000000010", titulo: "A Hora da Estrela", autor: "Lispector", estoque: 0 });
-  await criarLivro(app, { isbn: "9780000000011", titulo: "Estrela da manhã", autor: "Bandeira", estoque: 4 });
-  await criarLivro(app, { isbn: "9780000000012", titulo: "Grande Sertão", autor: "Rosa", estoque: 1 });
+test("a buyer can search by text and filter by availability", async () => {
+  await createBook(app, { isbn: "9780000000010", title: "A Hora da Estrela", author: "Lispector", stock: 0 });
+  await createBook(app, { isbn: "9780000000011", title: "Estrela da manhã", author: "Bandeira", stock: 4 });
+  await createBook(app, { isbn: "9780000000012", title: "Grande Sertão", author: "Rosa", stock: 1 });
 
-  const busca = await app.inject({ method: "GET", url: "/livros?q=estrela" });
-  expect(busca.statusCode).toBe(200);
-  const titulos = busca.json().livros.map((livro: { titulo: string }) => livro.titulo);
-  expect(titulos).toEqual(["A Hora da Estrela", "Estrela da manhã"]);
+  const search = await app.inject({ method: "GET", url: "/books?q=estrela" });
+  expect(search.statusCode).toBe(200);
+  const titles = search.json().books.map((book: { title: string }) => book.title);
+  expect(titles).toEqual(["A Hora da Estrela", "Estrela da manhã"]);
 
-  const disponiveis = await app.inject({ method: "GET", url: "/livros?q=estrela&disponivel=true" });
-  expect(disponiveis.json().livros.map((livro: { titulo: string }) => livro.titulo)).toEqual([
+  const available = await app.inject({ method: "GET", url: "/books?q=estrela&available=true" });
+  expect(available.json().books.map((book: { title: string }) => book.title)).toEqual([
     "Estrela da manhã",
   ]);
 });

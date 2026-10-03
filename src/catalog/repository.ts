@@ -2,112 +2,109 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "../db.js";
 import { AppError } from "../shared/errors.js";
 
-export type Livro = {
+export type Book = {
   id: string;
   isbn: string;
-  titulo: string;
-  autor: string;
-  precoCentavos: number;
-  estoque: number;
+  title: string;
+  author: string;
+  priceCents: number;
+  stock: number;
 };
 
-type LivroRow = {
+export type NewBook = {
+  isbn: string;
+  title: string;
+  author: string;
+  priceCents: number;
+  stock: number;
+};
+
+export type BookPatch = {
+  title?: string;
+  author?: string;
+  priceCents?: number;
+  stock?: number;
+};
+
+type BookRow = {
   id: string;
   isbn: string;
-  titulo: string;
-  autor: string;
-  preco_centavos: number;
-  estoque: number;
+  title: string;
+  author: string;
+  price_cents: number;
+  stock: number;
 };
 
-function toLivro(row: LivroRow): Livro {
+function toBook(row: BookRow): Book {
   return {
     id: row.id,
     isbn: row.isbn,
-    titulo: row.titulo,
-    autor: row.autor,
-    precoCentavos: row.preco_centavos,
-    estoque: row.estoque,
+    title: row.title,
+    author: row.author,
+    priceCents: row.price_cents,
+    stock: row.stock,
   };
 }
 
-export type CriarLivroInput = {
-  isbn: string;
-  titulo: string;
-  autor: string;
-  precoCentavos: number;
-  estoque: number;
-};
+const BOOK_COLUMNS = "id, isbn, title, author, price_cents, stock";
 
-export async function criarLivro(pool: Pool, input: CriarLivroInput): Promise<Livro> {
-  const id = randomUUID();
+export async function createBook(pool: Pool, input: NewBook): Promise<Book> {
   try {
-    const result = await pool.query<LivroRow>(
-      `INSERT INTO livros (id, isbn, titulo, autor, preco_centavos, estoque)
+    const result = await pool.query<BookRow>(
+      `INSERT INTO books (id, isbn, title, author, price_cents, stock)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, isbn, titulo, autor, preco_centavos, estoque`,
-      [id, input.isbn, input.titulo, input.autor, input.precoCentavos, input.estoque],
+       RETURNING ${BOOK_COLUMNS}`,
+      [randomUUID(), input.isbn, input.title, input.author, input.priceCents, input.stock],
     );
     const row = result.rows[0];
-    if (!row) throw new AppError(500, "erro_interno");
-    return toLivro(row);
+    if (!row) throw new AppError(500, "internal_error");
+    return toBook(row);
   } catch (error) {
-    if (isUniqueViolation(error)) throw new AppError(409, "isbn_ja_existe");
+    if (isUniqueViolation(error)) throw new AppError(409, "isbn_already_exists");
     throw error;
   }
 }
 
-export type AtualizarLivroInput = {
-  titulo?: string;
-  autor?: string;
-  precoCentavos?: number;
-  estoque?: number;
-};
-
-export async function atualizarLivro(
-  pool: Pool,
-  id: string,
-  input: AtualizarLivroInput,
-): Promise<Livro> {
-  const result = await pool.query<LivroRow>(
-    `UPDATE livros SET
-       titulo = COALESCE($2, titulo),
-       autor = COALESCE($3, autor),
-       preco_centavos = COALESCE($4, preco_centavos),
-       estoque = COALESCE($5, estoque)
+export async function updateBook(pool: Pool, id: string, patch: BookPatch): Promise<Book> {
+  const result = await pool.query<BookRow>(
+    `UPDATE books SET
+       title = COALESCE($2, title),
+       author = COALESCE($3, author),
+       price_cents = COALESCE($4, price_cents),
+       stock = COALESCE($5, stock)
      WHERE id = $1
-     RETURNING id, isbn, titulo, autor, preco_centavos, estoque`,
-    [id, input.titulo ?? null, input.autor ?? null, input.precoCentavos ?? null, input.estoque ?? null],
+     RETURNING ${BOOK_COLUMNS}`,
+    [id, patch.title ?? null, patch.author ?? null, patch.priceCents ?? null, patch.stock ?? null],
   );
   const row = result.rows[0];
-  if (!row) throw new AppError(404, "livro_nao_encontrado");
-  return toLivro(row);
+  if (!row) throw new AppError(404, "book_not_found");
+  return toBook(row);
 }
 
-export async function buscarLivro(pool: Pool, id: string): Promise<Livro> {
-  const result = await pool.query<LivroRow>(
-    `SELECT id, isbn, titulo, autor, preco_centavos, estoque FROM livros WHERE id = $1`,
+export async function getBook(pool: Pool, id: string): Promise<Book> {
+  const result = await pool.query<BookRow>(
+    `SELECT ${BOOK_COLUMNS} FROM books WHERE id = $1`,
     [id],
   );
   const row = result.rows[0];
-  if (!row) throw new AppError(404, "livro_nao_encontrado");
-  return toLivro(row);
+  if (!row) throw new AppError(404, "book_not_found");
+  return toBook(row);
 }
 
-export async function listarLivros(
+export async function listBooks(
   pool: Pool,
-  filtro: { q?: string; disponivel?: boolean },
-): Promise<Livro[]> {
-  const termo = filtro.q?.trim() ? escapeLike(filtro.q.trim()) : null;
-  const result = await pool.query<LivroRow>(
-    `SELECT id, isbn, titulo, autor, preco_centavos, estoque
-     FROM livros
-     WHERE ($1::text IS NULL OR titulo ILIKE '%' || $1 || '%' OR autor ILIKE '%' || $1 || '%')
-       AND ($2::boolean IS NULL OR ($2 = true AND estoque > 0) OR ($2 = false AND estoque = 0))
-     ORDER BY titulo, id`,
-    [termo, filtro.disponivel ?? null],
+  filter: { query?: string; available?: boolean },
+): Promise<Book[]> {
+  const term = filter.query?.trim() ? escapeLike(filter.query.trim()) : null;
+  const result = await pool.query<BookRow>(
+    `SELECT ${BOOK_COLUMNS}
+     FROM books
+     WHERE ($1::text IS NULL OR title ILIKE '%' || $1 || '%' OR author ILIKE '%' || $1 || '%')
+       AND ($2::boolean IS NULL OR ($2 = true AND stock > 0) OR ($2 = false AND stock = 0))
+     ORDER BY title, id`,
+    [term, filter.available ?? null],
   );
-  return result.rows.map(toLivro);
+  return result.rows.map(toBook);
 }
 
 function escapeLike(value: string): string {

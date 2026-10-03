@@ -1,70 +1,68 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "../db.js";
-import { adicionarItem, alterarQuantidade, removerItem, resolverSessao, verCarrinho } from "./repository.js";
+import { ensureSession } from "../session.js";
+import { addItem, changeQuantity, removeItem, viewCart } from "./repository.js";
 
 export async function registerCartRoutes(app: FastifyInstance, pool: Pool): Promise<void> {
-  app.post<{ Body: { livroId: string; quantidade: number } }>("/carrinho/itens", {
+  app.post<{ Body: { bookId: string; quantity: number } }>("/cart/items", {
     schema: {
       body: {
         type: "object",
-        required: ["livroId", "quantidade"],
+        required: ["bookId", "quantity"],
         additionalProperties: false,
         properties: {
-          livroId: { type: "string", format: "uuid" },
-          quantidade: { type: "integer", minimum: 1 },
+          bookId: { type: "string", format: "uuid" },
+          quantity: { type: "integer", minimum: 1 },
         },
       },
     },
   }, async (request, reply) => {
-    const sessao = await resolverSessao(pool, request, reply);
-    await adicionarItem(pool, sessao.carrinhoId, request.body.livroId, request.body.quantidade);
-    const itens = await verCarrinho(pool, sessao.carrinhoId);
-    return reply.code(201).send({ itens });
+    const sessionId = await ensureSession(pool, request, reply);
+    const cart = await addItem(pool, sessionId, request.body.bookId, request.body.quantity);
+    return reply.code(201).send(cart);
   });
 
-  app.patch<{ Params: { livroId: string }; Body: { quantidade: number } }>(
-    "/carrinho/itens/:livroId",
-    {
-      schema: {
-        params: {
-          type: "object",
-          required: ["livroId"],
-          properties: { livroId: { type: "string", format: "uuid" } },
-        },
-        body: {
-          type: "object",
-          required: ["quantidade"],
-          additionalProperties: false,
-          properties: { quantidade: { type: "integer", minimum: 1 } },
-        },
-      },
-    },
-    async (request, reply) => {
-      const sessao = await resolverSessao(pool, request, reply);
-      await alterarQuantidade(pool, sessao.carrinhoId, request.params.livroId, request.body.quantidade);
-      const itens = await verCarrinho(pool, sessao.carrinhoId);
-      return { itens };
-    },
-  );
-
-  app.delete<{ Params: { livroId: string } }>("/carrinho/itens/:livroId", {
+  app.patch<{ Params: { bookId: string }; Body: { quantity: number } }>("/cart/items/:bookId", {
     schema: {
       params: {
         type: "object",
-        required: ["livroId"],
-        properties: { livroId: { type: "string", format: "uuid" } },
+        required: ["bookId"],
+        properties: { bookId: { type: "string", format: "uuid" } },
+      },
+      body: {
+        type: "object",
+        required: ["quantity"],
+        additionalProperties: false,
+        properties: { quantity: { type: "integer", minimum: 1 } },
       },
     },
-  }, async (request, reply) => {
-    const sessao = await resolverSessao(pool, request, reply);
-    await removerItem(pool, sessao.carrinhoId, request.params.livroId);
-    const itens = await verCarrinho(pool, sessao.carrinhoId);
-    return { itens };
-  });
+  }, async (request, reply) => replyWithCart(pool, request, reply, (sessionId) =>
+    changeQuantity(pool, sessionId, request.params.bookId, request.body.quantity),
+  ));
 
-  app.get("/carrinho", async (request, reply) => {
-    const sessao = await resolverSessao(pool, request, reply);
-    const itens = await verCarrinho(pool, sessao.carrinhoId);
-    return { itens };
-  });
+  app.delete<{ Params: { bookId: string } }>("/cart/items/:bookId", {
+    schema: {
+      params: {
+        type: "object",
+        required: ["bookId"],
+        properties: { bookId: { type: "string", format: "uuid" } },
+      },
+    },
+  }, async (request, reply) => replyWithCart(pool, request, reply, (sessionId) =>
+    removeItem(pool, sessionId, request.params.bookId),
+  ));
+
+  app.get("/cart", async (request, reply) => replyWithCart(pool, request, reply, (sessionId) =>
+    viewCart(pool, sessionId),
+  ));
+}
+
+async function replyWithCart(
+  pool: Pool,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  load: (sessionId: string) => Promise<{ items: unknown[] }>,
+) {
+  const sessionId = await ensureSession(pool, request, reply);
+  return load(sessionId);
 }

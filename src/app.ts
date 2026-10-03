@@ -1,6 +1,6 @@
 import sensible from "@fastify/sensible";
 import cookie from "@fastify/cookie";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "./db.js";
 import { registerAdminRoutes } from "./admin/routes.js";
 import { registerCartRoutes } from "./cart/routes.js";
@@ -13,38 +13,35 @@ import { AppError } from "./shared/errors.js";
 export type BuildAppOptions = {
   pool: Pool;
   adminApiKey: string;
-  logger?: boolean | object;
+  logger?: FastifyServerOptions["logger"];
   payment?: PaymentPort;
   email?: EmailPort;
 };
 
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
-  const app = Fastify({
-    logger: (options.logger ?? false) as boolean,
-  });
+  const app = Fastify({ logger: options.logger ?? false });
 
   await app.register(sensible);
   await app.register(cookie);
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
-      return reply.code(error.statusCode).send({ erro: error.erro });
+      return reply.code(error.statusCode).send({ error: error.code });
     }
     if (isValidationError(error)) {
-      return reply.code(400).send({ erro: "requisicao_invalida" });
+      return reply.code(400).send({ error: "invalid_request" });
     }
     request.log.error(error);
-    return reply.code(500).send({ erro: "erro_interno" });
+    return reply.code(500).send({ error: "internal_error" });
   });
 
   app.get("/health", async () => ({ status: "ok" }));
 
-  const pool = options.pool;
-  await registerCatalogRoutes(app, pool);
-  await registerAdminRoutes(app, { pool, adminApiKey: options.adminApiKey });
-  await registerCartRoutes(app, pool);
+  await registerCatalogRoutes(app, options.pool);
+  await registerAdminRoutes(app, { pool: options.pool, adminApiKey: options.adminApiKey });
+  await registerCartRoutes(app, options.pool);
   await registerCheckoutRoutes(app, {
-    pool,
+    pool: options.pool,
     payment: options.payment ?? createFakePayment(),
     email: options.email ?? createFakeEmail(),
   });

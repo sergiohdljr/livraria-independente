@@ -1,14 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "../db.js";
 import type { EmailPort } from "../email/fake.js";
-import type { PagamentoStatus, PaymentPort } from "../payment/fake.js";
+import type { PaymentPort, PaymentStatus } from "../payment/fake.js";
 import { AppError } from "../shared/errors.js";
-import { resolverSessao } from "../cart/repository.js";
-import { buscarPedido, executarCheckout } from "./service.js";
+import { readSessionId } from "../session.js";
+import { checkout, getOrder } from "./service.js";
 
 type CheckoutBody = {
-  cep: string;
-  endereco: string;
+  postalCode: string;
+  address: string;
   email: string;
 };
 
@@ -20,29 +20,29 @@ export async function registerCheckoutRoutes(
     schema: {
       body: {
         type: "object",
-        required: ["cep", "endereco", "email"],
+        required: ["postalCode", "address", "email"],
         additionalProperties: false,
         properties: {
-          cep: { type: "string", minLength: 8 },
-          endereco: { type: "string", minLength: 1 },
+          postalCode: { type: "string", minLength: 8 },
+          address: { type: "string", minLength: 1 },
           email: { type: "string", format: "email" },
         },
       },
     },
   }, async (request, reply) => {
-    const sessao = await resolverSessao(deps.pool, request, reply);
-    const simular = simularPagamento(request.headers["x-pagamento-simulado"]);
-    const resultado = await executarCheckout(deps.pool, deps.payment, deps.email, {
-      sessaoId: sessao.sessaoId,
-      cep: request.body.cep,
-      endereco: request.body.endereco,
+    const sessionId = readSessionId(request);
+    if (!sessionId) throw new AppError(422, "empty_cart");
+    const result = await checkout(deps.pool, deps.payment, deps.email, {
+      sessionId,
+      postalCode: request.body.postalCode,
+      address: request.body.address,
       email: request.body.email,
-      simular,
+      simulate: simulatedPayment(request.headers["x-payment-simulation"]),
     });
-    return reply.code(201).send(resultado);
+    return reply.code(201).send(result);
   });
 
-  app.get<{ Params: { id: string } }>("/pedidos/:id", {
+  app.get<{ Params: { id: string } }>("/orders/:id", {
     schema: {
       params: {
         type: "object",
@@ -50,16 +50,16 @@ export async function registerCheckoutRoutes(
         properties: { id: { type: "string", format: "uuid" } },
       },
     },
-  }, async (request, reply) => {
-    const cookie = request.cookies["sessao"];
-    if (!cookie) throw new AppError(404, "pedido_nao_encontrado");
-    const pedido = await buscarPedido(deps.pool, cookie, request.params.id);
-    return { pedido };
+  }, async (request) => {
+    const sessionId = readSessionId(request);
+    if (!sessionId) throw new AppError(404, "order_not_found");
+    const order = await getOrder(deps.pool, sessionId, request.params.id);
+    return { order };
   });
 }
 
-function simularPagamento(header: string | string[] | undefined): PagamentoStatus | undefined {
+function simulatedPayment(header: string | string[] | undefined): PaymentStatus | undefined {
   const value = Array.isArray(header) ? header[0] : header;
-  if (value === "aceito" || value === "recusado") return value;
+  if (value === "accepted" || value === "declined") return value;
   return undefined;
 }
