@@ -33,47 +33,19 @@ sequenceDiagram
     Buyer->>Checkout: POST /checkout
     Checkout->>Checkout: pg_advisory_lock(session)
     Checkout->>Checkout: read shipping rate
-    alt no shipping rate
-        Checkout-->>Buyer: 422 shipping_unavailable
-    else rate found
-        Checkout->>Cart: GET /internal/carts/:sessionId
-        Cart-->>Checkout: bookId, quantity
-        loop each line
-            Checkout->>Catalog: GET /books/:id
-            Catalog-->>Checkout: price, stock
-        end
-        alt cart is empty
-            Checkout-->>Buyer: 422 empty_cart
-        else same lines as an existing order
-            Checkout->>Cart: DELETE /internal/carts/:sessionId
-            Checkout->>Checkout: log order confirmation
-            Checkout-->>Buyer: 201 existing order
-        else quantity exceeds stock
-            Checkout-->>Buyer: 409 insufficient_stock
-        else new order
-            Checkout->>Payment: POST /internal/charges
-            alt declined
-                Payment-->>Checkout: declined
-                Checkout-->>Buyer: 402 payment_declined
-            else accepted
-                Payment-->>Checkout: accepted, id
-                Checkout->>Catalog: POST /internal/stock/debit
-                alt debit refused
-                    Checkout-->>Buyer: 409 insufficient_stock
-                else debited
-                    Checkout->>Checkout: insert order with quoted prices
-                    alt insert fails
-                        Checkout->>Catalog: POST /internal/stock/restore
-                        Checkout-->>Buyer: 500 internal_error
-                    else stored
-                        Checkout->>Cart: DELETE /internal/carts/:sessionId
-                        Checkout->>Checkout: log order confirmation
-                        Checkout-->>Buyer: 201 order
-                    end
-                end
-            end
-        end
+    Checkout->>Cart: GET /internal/carts/:sessionId
+    Cart-->>Checkout: bookId, quantity
+    loop each line
+        Checkout->>Catalog: GET /books/:id
+        Catalog-->>Checkout: price, stock
     end
+    Checkout->>Payment: POST /internal/charges
+    Payment-->>Checkout: accepted, id
+    Checkout->>Catalog: POST /internal/stock/debit
+    Checkout->>Checkout: insert order with quoted prices
+    Checkout->>Cart: DELETE /internal/carts/:sessionId
+    Checkout->>Checkout: log order confirmation
+    Checkout-->>Buyer: 201 order
     Checkout->>Checkout: pg_advisory_unlock(session)
 ```
 
