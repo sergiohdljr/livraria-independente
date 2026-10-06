@@ -1,0 +1,39 @@
+name: livraria-independente
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: livraria
+      POSTGRES_PASSWORD: livraria
+      POSTGRES_DB: livraria_independente
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U livraria -d livraria_independente"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://livraria:livraria@postgres:5432/livraria_independente
+      ADMIN_API_KEY: dev-admin-key
+      INTERNAL_API_KEY: dev-internal-key
+      PORT: "3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pg-data:
+    name: livraria-independente-pg

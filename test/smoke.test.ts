@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { startCluster } from "../src/cluster.js";
-
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://movielogger:movielogger@localhost:5432/livraria_independente_test";
+import { databaseUrl } from "./helpers.js";
 
 let app: FastifyInstance;
 let close: () => Promise<void>;
