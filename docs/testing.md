@@ -4,28 +4,23 @@ Manual checks against a running server, then the automated suite. Prices are int
 
 ## 1. Postgres
 
-You need a database the app can migrate on startup. With the local Postgres user from `.env.example`:
-
 ```bash
-psql "postgres://movielogger:movielogger@localhost:5432/postgres" -c "CREATE DATABASE livraria_independente;"
-psql "postgres://movielogger:movielogger@localhost:5432/postgres" -c "CREATE DATABASE livraria_independente_test;"
+docker compose up -d postgres
 ```
 
-`livraria_independente` is for the server. `livraria_independente_test` is for `npm test`. Ignore "already exists".
+Postgres listens on `localhost:5433`. The first boot creates `livraria_independente` for the server and `livraria_independente_test` for `npm test`, both owned by role `livraria` with password `livraria`.
 
 ## 2. Install and start
 
 ```bash
-npm install
-cp .env.example .env
-npm run dev
+docker compose up --build
 ```
 
-Defaults if you skip `.env`:
+That starts Postgres and the dev gateway. The app does not load a `.env` file. The `app` service sets `DATABASE_URL` to `postgres://livraria:livraria@postgres:5432/livraria_independente`. On the host, unset variables fall back to:
 
 | Variable | Default |
 | --- | --- |
-| `DATABASE_URL` | `postgres://movielogger:movielogger@localhost:5432/livraria_independente` |
+| `DATABASE_URL` | `postgres://livraria:livraria@localhost:5433/livraria_independente` |
 | `ADMIN_API_KEY` | `dev-admin-key` |
 | `PORT` | `3000` |
 

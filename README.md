@@ -57,27 +57,32 @@ Decisions are in `docs/adr/`. Vocabulary is in `GLOSSARY.md`.
 
 ## Run
 
-Requirements: Node 22 and Postgres. The app does not load a `.env` file. Unset variables fall back to the values in `.env.example`.
+Requirements: Docker, and Node 22 on the host for the test suite. The app does not load a `.env` file. Unset variables fall back to the values in `.env.example`.
 
 ```bash
-psql "postgres://movielogger:movielogger@localhost:5432/postgres" \
-  -c "CREATE DATABASE livraria_independente" \
-  -c "CREATE DATABASE livraria_independente_test"
-
-npm install
-npm run dev
+docker compose up --build
 ```
 
-`npm run dev` runs `tsx --watch src/server.ts`. Startup creates the four schemas and seeds shipping rates when the table is empty. The gateway listens on `0.0.0.0:3000`.
+The Compose project `livraria-independente` starts Postgres 16 and the dev gateway (`tsx --watch`). Postgres is published on `localhost:5433`. The gateway listens on `0.0.0.0:3000`. Inside the Compose network the app uses host `postgres` and port 5432.
 
-| Variable | Default |
-| --- | --- |
-| `DATABASE_URL` | `postgres://movielogger:movielogger@localhost:5432/livraria_independente` |
-| `ADMIN_API_KEY` | `dev-admin-key` |
-| `INTERNAL_API_KEY` | `dev-internal-key` |
-| `PORT` | `3000` |
+The first boot creates `livraria_independente` and `livraria_independente_test`, owned by role `livraria` with password `livraria`. Startup creates the four schemas and seeds shipping rates when the table is empty.
 
-`npm run build` compiles to `dist/`. `npm start` runs `node dist/server.js`.
+| Variable | Host fallback | `app` service |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgres://livraria:livraria@localhost:5433/livraria_independente` | `postgres://livraria:livraria@postgres:5432/livraria_independente` |
+| `ADMIN_API_KEY` | `dev-admin-key` | `dev-admin-key` |
+| `INTERNAL_API_KEY` | `dev-internal-key` | `dev-internal-key` |
+| `PORT` | `3000` | `3000` |
+
+Postgres data stays in the named volume `livraria-independente-pg`. `docker compose down -v` drops it, including both databases. After a `package-lock.json` change, rebuild the image and recreate the app's `node_modules` volume:
+
+```bash
+docker compose rm -sfv app
+docker compose build app
+docker compose up
+```
+
+`npm run build` compiles to `dist/`. `npm start` runs `node dist/server.js` on the host, using the host fallback URL.
 
 ## Try a purchase
 
@@ -125,8 +130,9 @@ Errors are `{ "error": "<code>" }`.
 ## Tests
 
 ```bash
+npm install
 npm test
 npm run typecheck
 ```
 
-Tests call the public gateway with Fastify `inject` and a real Postgres database, `livraria_independente_test`, unless `DATABASE_URL` is already set. Each run truncates books, carts, orders, and payments in that database. Point `DATABASE_URL` at the test database before `npm test` when your shell already exports the development URL.
+Tests call the public gateway with Fastify `inject` and a real Postgres database, `livraria_independente_test` on `localhost:5433`, unless `DATABASE_URL` is already set. Start the Compose Postgres first. Each run truncates books, carts, orders, and payments in that database. Point `DATABASE_URL` at the test database before `npm test` when your shell already exports the development URL.

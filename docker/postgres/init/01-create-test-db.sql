@@ -1,0 +1,1 @@
+CREATE DATABASE livraria_independente_test OWNER livraria;

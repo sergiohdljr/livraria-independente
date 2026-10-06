@@ -3,7 +3,7 @@ import { startCluster } from "../src/cluster.js";
 
 export const databaseUrl =
   process.env.DATABASE_URL ??
-  "postgres://movielogger:movielogger@localhost:5432/livraria_independente_test";
+  "postgres://livraria:livraria@localhost:5433/livraria_independente_test";
 
 export const adminApiKey = "test-key";
 
